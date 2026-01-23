@@ -316,8 +316,8 @@ def main():
         print(f"\nRun '{sys.argv[0]} --help' for more information", file=sys.stderr)
         sys.exit(1)
     
-    # Check for debug mode via environment variable (support both old and new names)
-    enable_logging = os.environ.get('AUTOYES_DEBUG', os.environ.get('AUTOCLAUDE_DEBUG', '0')) == '1'
+    # Check for debug mode via environment variable
+    enable_logging = os.environ.get('AUTOYES_DEBUG', '0') == '1'
     if enable_logging:
         log_path = Path.home() / ".autoyes" / "autoyes.log"
         print(f"[AutoYes] Debug logging enabled: {log_path}", file=sys.stderr)
