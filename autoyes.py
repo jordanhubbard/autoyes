@@ -74,17 +74,17 @@ class AutoYes:
         menu_prefix = r'(?:[›❯>➤•*]\s*)?'
         self.approval_patterns: list[tuple[re.Pattern, bytes, str]] = [
             # Numbered menu format (Claude, many CLI tools): "1. Yes" / "2. No" (optional 3rd option)
-            (re.compile(rf'{menu_prefix}1[\.)]\s*Yes\s+{menu_prefix}2[\.)]\s*No(?:\s+{menu_prefix}3[\.)]\s*[^\n]+)?', re.IGNORECASE | re.MULTILINE), b'1\r', "sending '1' + Enter"),
+            (re.compile(rf'{menu_prefix}1[\.)]\s*Yes\s+{menu_prefix}2[\.)]\s*No(?:\s+{menu_prefix}3[\.)]\s*[^\n]+)?', re.IGNORECASE | re.MULTILINE), b'\n', "pressing Enter"),
             # "Do you want to proceed?" followed by "1. Yes"
-            (re.compile(rf'Do you want to (?:proceed|continue)\?\s+{menu_prefix}1[\.)]\s*Yes', re.IGNORECASE | re.MULTILINE), b'1\r', "sending '1' + Enter"),
+            (re.compile(rf'Do you want to (?:proceed|continue)\?\s+{menu_prefix}1[\.)]\s*Yes', re.IGNORECASE | re.MULTILINE), b'\n', "pressing Enter"),
             # Generic approval prompts with yes/no options
-            (re.compile(r'(?:Do you want to|Continue|Proceed|Approve|Confirm|Are you sure)\b[^\n]*?\s*(?:\(|\[)?\s*(?:yes\s*/\s*no|y\s*/\s*n)\s*(?:\)|\])?', re.IGNORECASE), b'y\r', "sending 'y' + Enter"),
+            (re.compile(r'(?:Do you want to|Continue|Proceed|Approve|Confirm|Are you sure)\b[^\n]*?\s*(?:\(|\[)?\s*(?:yes\s*/\s*no|y\s*/\s*n)\s*(?:\)|\])?', re.IGNORECASE), b'y\n', "sending 'y' + Enter"),
             # Terraform style: "Enter a value:"
-            (re.compile(r'Enter a value:\s*$', re.IGNORECASE | re.MULTILINE), b'yes\r', "sending 'yes' + Enter"),
+            (re.compile(r'Enter a value:\s*$', re.IGNORECASE | re.MULTILINE), b'yes\n', "sending 'yes' + Enter"),
         ]
         self.relaxed_approval_patterns: list[tuple[re.Pattern, bytes, str]] = [
-            (re.compile(r'\?\s*(?:\(|\[)?\s*(?:yes|y)\s*/\s*(?:no|n)(?:\s*/\s*[^\s\]\)]+)?\s*(?:\)|\])?', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
-            (re.compile(r'\bYes\b\s*/\s*\bNo\b\s*/\s*[^\n]+', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
+            (re.compile(r'\?\s*(?:\(|\[)?\s*(?:yes|y)\s*/\s*(?:no|n)(?:\s*/\s*[^\s\]\)]+)?\s*(?:\)|\])?', re.IGNORECASE), b'y\n', "sending 'y' + Enter (relaxed)"),
+            (re.compile(r'\bYes\b\s*/\s*\bNo\b\s*/\s*[^\n]+', re.IGNORECASE), b'y\n', "sending 'y' + Enter (relaxed)"),
         ]
         
     def log(self, message: str):
@@ -107,10 +107,10 @@ class AutoYes:
         except Exception as e:
             self.log(f"[{timestamp}] {direction}: <decode error: {e}>\n")
     
-    def print_status(self, message: str, color: str = RESET):
+    def print_status(self, message: str, color: str = RESET, *, visible: bool = False):
         """Print a status message to stderr"""
         formatted = f"{color}{BOLD}[AutoYes]{RESET} {color}{message}{RESET}"
-        if self.use_status_line:
+        if visible and self.use_status_line:
             with self.status_lock:
                 sys.stderr.write("\0337")
                 sys.stderr.write("\033[999B")
@@ -118,9 +118,6 @@ class AutoYes:
                 sys.stderr.write(formatted)
                 sys.stderr.write("\0338")
                 sys.stderr.flush()
-        else:
-            sys.stderr.write(f"\r\n{formatted}\r\n")
-            sys.stderr.flush()
         if self.enable_logging:
             self.log(f"[STATUS] {message}\n")
         
@@ -129,9 +126,9 @@ class AutoYes:
         with self.state_lock:
             self.auto_approve = not self.auto_approve
         if self.auto_approve:
-            self.print_status("Auto-approve mode: ON", GREEN)
+            self.print_status("Auto-approve mode: ON", GREEN, visible=True)
         else:
-            self.print_status("Auto-approve mode: OFF", RED)
+            self.print_status("Auto-approve mode: OFF", RED, visible=True)
             
     def check_for_approval_prompt(self, text: str, relaxed: bool = False) -> Optional[tuple[bytes, str]]:
         """Check if the text contains an approval prompt"""
@@ -385,10 +382,6 @@ def main():
     
     # Check for debug mode via environment variable
     enable_logging = os.environ.get('AUTOYES_DEBUG', '0') == '1'
-    if enable_logging:
-        log_path = Path.home() / ".autoyes" / "autoyes.log"
-        print(f"[AutoYes] Debug logging enabled: {log_path}", file=sys.stderr)
-    
     command = sys.argv[1:]
     
     proxy = AutoYes(command, enable_logging=enable_logging)
