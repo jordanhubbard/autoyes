@@ -53,6 +53,8 @@ class AutoYes:
         self.output_queue = queue.Queue()
         self.stop_event = threading.Event()
         self.state_lock = threading.Lock()
+        self.status_lock = threading.Lock()
+        self.use_status_line = sys.stderr.isatty() and os.environ.get("TERM") not in (None, "dumb")
         
         # Logging setup
         self.enable_logging = enable_logging
@@ -84,10 +86,6 @@ class AutoYes:
             (re.compile(r'\?\s*(?:\(|\[)?\s*(?:yes|y)\s*/\s*(?:no|n)(?:\s*/\s*[^\s\]\)]+)?\s*(?:\)|\])?', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
             (re.compile(r'\bYes\b\s*/\s*\bNo\b\s*/\s*[^\n]+', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
         ]
-        self.ignore_prompt_patterns: list[re.Pattern] = [
-            re.compile(r'Permission rule .*requires confirmation for this command', re.IGNORECASE),
-            re.compile(r'\bEsc to cancel\b.*\bTab to add additional instructions\b', re.IGNORECASE),
-        ]
         
     def log(self, message: str):
         """Write a message to the log file"""
@@ -111,8 +109,18 @@ class AutoYes:
     
     def print_status(self, message: str, color: str = RESET):
         """Print a status message to stderr"""
-        sys.stderr.write(f"\r\n{color}{BOLD}[AutoYes]{RESET} {color}{message}{RESET}\r\n")
-        sys.stderr.flush()
+        formatted = f"{color}{BOLD}[AutoYes]{RESET} {color}{message}{RESET}"
+        if self.use_status_line:
+            with self.status_lock:
+                sys.stderr.write("\0337")
+                sys.stderr.write("\033[999B")
+                sys.stderr.write("\r\033[2K")
+                sys.stderr.write(formatted)
+                sys.stderr.write("\0338")
+                sys.stderr.flush()
+        else:
+            sys.stderr.write(f"\r\n{formatted}\r\n")
+            sys.stderr.flush()
         if self.enable_logging:
             self.log(f"[STATUS] {message}\n")
         
@@ -139,12 +147,6 @@ class AutoYes:
         # Also normalize line endings
         clean_text = clean_text.replace('\r\n', '\n').replace('\r', '\n')
 
-        for pattern in self.ignore_prompt_patterns:
-            if pattern.search(clean_text):
-                if self.enable_logging:
-                    self.log(f"[PATTERN IGNORE] Matched ignore pattern: {pattern.pattern}\n")
-                return None
-        
         if self.enable_logging:
             mode = "RELAXED" if relaxed else "STRICT"
             self.log(f"\n[PATTERN CHECK] Mode: {mode} | Buffer size: {len(text)} chars\n")

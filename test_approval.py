@@ -7,6 +7,8 @@ Use this to test AutoYes's detection without running actual commands
 import sys
 import time
 
+MAX_PROMPTS = 5
+
 def simulate_approval_prompt():
     """Simulate an approval prompt"""
     print("\nBash command")
@@ -43,7 +45,7 @@ def main():
     print("=" * 60)
     
     count = 1
-    while True:
+    while count <= MAX_PROMPTS:
         print(f"\n\n--- Prompt #{count} ---")
         time.sleep(1)
         
@@ -54,6 +56,9 @@ def main():
         else:
             print("\nExiting...")
             break
+
+    if count > MAX_PROMPTS:
+        print(f"\nReached max prompts ({MAX_PROMPTS}). Exiting...")
 
 if __name__ == "__main__":
     try:
