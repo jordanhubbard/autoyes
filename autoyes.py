@@ -19,6 +19,8 @@ import tty
 import signal
 import re
 import time
+import threading
+import queue
 from typing import Optional
 from datetime import datetime
 from pathlib import Path
@@ -43,9 +45,14 @@ class AutoYes:
         self.original_tty = None
         self.buffer_limit = 16384
         self.read_chunk_size = 4096
+        self.pty_read_chunk_size = 16384
         self.idle_prompt_timeout = 0.75
+        self.response_delay = 0.15
         self.last_output_time = 0.0
         self.last_idle_snapshot = ""
+        self.output_queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.state_lock = threading.Lock()
         
         # Logging setup
         self.enable_logging = enable_logging
@@ -62,19 +69,24 @@ class AutoYes:
         
         # Patterns that indicate the command is asking for approval
         # These work with Claude, Terraform, kubectl, and many other tools
-        self.approval_patterns = [
+        menu_prefix = r'(?:[›❯>➤•*]\s*)?'
+        self.approval_patterns: list[tuple[re.Pattern, bytes, str]] = [
             # Numbered menu format (Claude, many CLI tools): "1. Yes" / "2. No" (optional 3rd option)
-            re.compile(r'(?:›\s*)?1[\.)]\s*Yes\s*\n\s*(?:›\s*)?2[\.)]\s*No(?:\s*\n\s*(?:›\s*)?3[\.)]\s*[^\n]+)?', re.IGNORECASE | re.MULTILINE),
+            (re.compile(rf'{menu_prefix}1[\.)]\s*Yes\s+{menu_prefix}2[\.)]\s*No(?:\s+{menu_prefix}3[\.)]\s*[^\n]+)?', re.IGNORECASE | re.MULTILINE), b'1\r', "sending '1' + Enter"),
             # "Do you want to proceed?" followed by "1. Yes"
-            re.compile(r'Do you want to (?:proceed|continue)\?\s*\n\s*(?:›\s*)?1[\.)]\s*Yes', re.IGNORECASE | re.MULTILINE),
+            (re.compile(rf'Do you want to (?:proceed|continue)\?\s+{menu_prefix}1[\.)]\s*Yes', re.IGNORECASE | re.MULTILINE), b'1\r', "sending '1' + Enter"),
             # Generic approval prompts with yes/no options
-            re.compile(r'(?:Do you want to|Continue|Proceed|Approve|Confirm)\s*\??\s*\(?\s*(?:yes?/no?|y/n)\s*\)?', re.IGNORECASE),
+            (re.compile(r'(?:Do you want to|Continue|Proceed|Approve|Confirm|Are you sure)\b[^\n]*?\s*(?:\(|\[)?\s*(?:yes\s*/\s*no|y\s*/\s*n)\s*(?:\)|\])?', re.IGNORECASE), b'y\r', "sending 'y' + Enter"),
             # Terraform style: "Enter a value:"
-            re.compile(r'Enter a value:\s*$', re.IGNORECASE | re.MULTILINE),
+            (re.compile(r'Enter a value:\s*$', re.IGNORECASE | re.MULTILINE), b'yes\r', "sending 'yes' + Enter"),
         ]
-        self.relaxed_approval_patterns = [
-            re.compile(r'\?\s*(?:\(|\[)?\s*(?:yes|y)\s*/\s*(?:no|n)(?:\s*/\s*[^\s\]\)]+)?\s*(?:\)|\])?', re.IGNORECASE),
-            re.compile(r'\bYes\b\s*/\s*\bNo\b\s*/\s*[^\n]+', re.IGNORECASE),
+        self.relaxed_approval_patterns: list[tuple[re.Pattern, bytes, str]] = [
+            (re.compile(r'\?\s*(?:\(|\[)?\s*(?:yes|y)\s*/\s*(?:no|n)(?:\s*/\s*[^\s\]\)]+)?\s*(?:\)|\])?', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
+            (re.compile(r'\bYes\b\s*/\s*\bNo\b\s*/\s*[^\n]+', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
+        ]
+        self.ignore_prompt_patterns: list[re.Pattern] = [
+            re.compile(r'Permission rule .*requires confirmation for this command', re.IGNORECASE),
+            re.compile(r'\bEsc to cancel\b.*\bTab to add additional instructions\b', re.IGNORECASE),
         ]
         
     def log(self, message: str):
@@ -106,16 +118,18 @@ class AutoYes:
         
     def toggle_auto_approve(self):
         """Toggle auto-approval mode"""
-        self.auto_approve = not self.auto_approve
+        with self.state_lock:
+            self.auto_approve = not self.auto_approve
         if self.auto_approve:
             self.print_status("Auto-approve mode: ON", GREEN)
         else:
             self.print_status("Auto-approve mode: OFF", RED)
             
-    def check_for_approval_prompt(self, text: str, relaxed: bool = False) -> bool:
+    def check_for_approval_prompt(self, text: str, relaxed: bool = False) -> Optional[tuple[bytes, str]]:
         """Check if the text contains an approval prompt"""
         # Look at the last few lines of the buffer
-        lines = text.split('\n')
+        normalized_text = text.replace('\r\n', '\n').replace('\r', '\n')
+        lines = normalized_text.split('\n')
         max_lines = 20 if relaxed else 10
         last_lines = '\n'.join(lines[-max_lines:])
         
@@ -124,34 +138,39 @@ class AutoYes:
         clean_text = ANSI_ESCAPE.sub('', last_lines)
         # Also normalize line endings
         clean_text = clean_text.replace('\r\n', '\n').replace('\r', '\n')
+
+        for pattern in self.ignore_prompt_patterns:
+            if pattern.search(clean_text):
+                if self.enable_logging:
+                    self.log(f"[PATTERN IGNORE] Matched ignore pattern: {pattern.pattern}\n")
+                return None
         
         if self.enable_logging:
             mode = "RELAXED" if relaxed else "STRICT"
-            self.log(f"\n[PATTERN CHECK] Mode: {mode} | Buffer size: {len(self.buffer)} chars\n")
+            self.log(f"\n[PATTERN CHECK] Mode: {mode} | Buffer size: {len(text)} chars\n")
             self.log(f"[PATTERN CHECK] Last {max_lines} lines (raw):\n{repr(last_lines)}\n")
             self.log(f"[PATTERN CHECK] Last {max_lines} lines (clean):\n{repr(clean_text)}\n")
         
         patterns = self.approval_patterns + (self.relaxed_approval_patterns if relaxed else [])
-        for i, pattern in enumerate(patterns):
+        for i, (pattern, response, response_label) in enumerate(patterns):
             match = pattern.search(clean_text)
             if match:
                 if self.enable_logging:
                     self.log(f"[PATTERN MATCH] Pattern #{i} matched: {pattern.pattern}\n")
                     self.log(f"[PATTERN MATCH] Matched text: {repr(match.group())}\n")
-                return True
+                    self.log(f"[PATTERN MATCH] Response: {response_label} ({response!r})\n")
+                return response, response_label
             elif self.enable_logging:
                 self.log(f"[PATTERN CHECK] Pattern #{i} no match: {pattern.pattern}\n")
         
-        return False
+        return None
         
-    def auto_respond_yes(self):
-        """Send 'yes' response to command"""
-        self.print_status("Auto-responding: YES (pressing Enter)", YELLOW)
-        # Send Enter key to select default option (1. Yes)
-        # In terminal/PTY, Enter key sends carriage return (\r), not newline (\n)
-        os.write(self.master_fd, b'\r')
+    def auto_respond(self, response: bytes, response_label: str):
+        """Send auto-approval response to command"""
+        self.print_status(f"Auto-responding: YES ({response_label})", YELLOW)
+        os.write(self.master_fd, response)
         if self.enable_logging:
-            self.log(f"[AUTO_RESPOND] Sent carriage return (\\r) to select default option\n")
+            self.log(f"[AUTO_RESPOND] Sent {response_label} ({response!r})\n")
         
     def handle_user_input(self, data: bytes) -> bytes:
         """Process user input, intercepting Ctrl-Y"""
@@ -164,34 +183,55 @@ class AutoYes:
             data = data.replace(b'\x19', b'')
         return data
         
-    def handle_command_output(self, data: bytes) -> bool:
+    def handle_command_output(self, data: bytes) -> Optional[tuple[bytes, str]]:
         """Process command output, checking for approval prompts
         
-        Returns True if an approval prompt was detected (and will be auto-responded)
+        Returns a response tuple if an approval prompt was detected (and will be auto-responded)
         """
         self.log_data("COMMAND_OUTPUT", data)
         
         # Add to buffer for pattern matching
         try:
             text = data.decode('utf-8', errors='replace')
-            self.buffer += text
-            
-            # Keep buffer from growing too large
-            if len(self.buffer) > self.buffer_limit:
-                self.buffer = self.buffer[-self.buffer_limit:]
-                
-            # Check for approval prompt if auto-approve is on
-            if self.auto_approve and self.check_for_approval_prompt(self.buffer):
-                # Return True to signal that we should auto-respond
-                # But don't respond yet - let the prompt be displayed first
-                return True
+            with self.state_lock:
+                self.buffer += text
+                if len(self.buffer) > self.buffer_limit:
+                    self.buffer = self.buffer[-self.buffer_limit:]
+                buffer_snapshot = self.buffer
+                auto_approve = self.auto_approve
+
+            if auto_approve:
+                response = self.check_for_approval_prompt(buffer_snapshot)
+                if response:
+                    return response
         except Exception as e:
             # Don't let decoding errors break the proxy
             if self.enable_logging:
                 self.log(f"[ERROR] Exception in handle_command_output: {e}\n")
             pass
         
-        return False
+        return None
+
+    def clear_buffer(self):
+        with self.state_lock:
+            self.buffer = ""
+            self.last_idle_snapshot = ""
+
+    def pty_reader(self):
+        while not self.stop_event.is_set():
+            try:
+                data = os.read(self.master_fd, self.pty_read_chunk_size)
+                if not data:
+                    self.output_queue.put(None)
+                    return
+                with self.state_lock:
+                    self.last_output_time = time.monotonic()
+                    self.last_idle_snapshot = ""
+                response = self.handle_command_output(data)
+                self.output_queue.put((data, response))
+            except OSError:
+                self.output_queue.put(None)
+                return
             
     def setup_terminal(self):
         """Set terminal to raw mode"""
@@ -223,75 +263,66 @@ class AutoYes:
         else:  # Parent process
             try:
                 self.setup_terminal()
-                
-                # Main I/O loop
                 self.last_output_time = time.monotonic()
+                reader_thread = threading.Thread(target=self.pty_reader, daemon=True)
+                reader_thread.start()
 
                 while True:
-                    # Use select to wait for I/O on stdin or master PTY
-                    r, w, e = select.select([sys.stdin, self.master_fd], [], [], 0.1)
+                    r, _, _ = select.select([sys.stdin], [], [], 0.05)
 
-                    if not r:
-                        now = time.monotonic()
-                        if (
-                            self.auto_approve
-                            and self.buffer
-                            and (now - self.last_output_time) >= self.idle_prompt_timeout
-                        ):
-                            snapshot = self.buffer[-512:]
-                            if snapshot != self.last_idle_snapshot:
-                                self.last_idle_snapshot = snapshot
-                                if self.check_for_approval_prompt(self.buffer, relaxed=True):
-                                    if self.enable_logging:
-                                        self.log("[IDLE CHECK] Triggered relaxed approval check\n")
-                                    self.auto_respond_yes()
-                                    self.buffer = ""
-                                    self.last_output_time = now
-                        continue
-                    
                     if sys.stdin in r:
-                        # User input
                         try:
                             data = os.read(sys.stdin.fileno(), self.read_chunk_size)
                             if not data:
                                 break
-                                
-                            # Process input (intercept Ctrl-Y)
                             data = self.handle_user_input(data)
-                            
-                            # Forward to command (if not empty after processing)
                             if data:
                                 os.write(self.master_fd, data)
                         except OSError:
                             break
-                            
-                    if self.master_fd in r:
-                        # Command output
+
+                    while True:
                         try:
-                            data = os.read(self.master_fd, self.read_chunk_size)
-                            if not data:
-                                break
-                            self.last_output_time = time.monotonic()
-                            self.last_idle_snapshot = ""
-                                
-                            # Process output (check for approval prompts)
-                            should_auto_respond = self.handle_command_output(data)
-                            
-                            # Forward to user
-                            os.write(sys.stdout.fileno(), data)
-                            sys.stdout.flush()  # Ensure prompt is displayed
-                            
-                            # Now respond if we detected an approval prompt
-                            if should_auto_respond:
-                                time.sleep(0.15)  # Slightly longer delay for output to be visible
-                                self.auto_respond_yes()
-                                self.buffer = ""  # Clear buffer after responding
-                        except OSError:
+                            item = self.output_queue.get_nowait()
+                        except queue.Empty:
                             break
+                        if item is None:
+                            return
+                        data, response = item
+                        os.write(sys.stdout.fileno(), data)
+                        sys.stdout.flush()
+                        if response:
+                            time.sleep(self.response_delay)
+                            self.auto_respond(response[0], response[1])
+                            self.clear_buffer()
+
+                    now = time.monotonic()
+                    with self.state_lock:
+                        auto_approve = self.auto_approve
+                        buffer_snapshot = self.buffer
+                        last_output_time = self.last_output_time
+                        last_idle_snapshot = self.last_idle_snapshot
+
+                    if auto_approve and buffer_snapshot and (now - last_output_time) >= self.idle_prompt_timeout:
+                        snapshot = buffer_snapshot[-512:]
+                        if snapshot != last_idle_snapshot:
+                            response = self.check_for_approval_prompt(buffer_snapshot, relaxed=True)
+                            if response:
+                                if self.enable_logging:
+                                    self.log("[IDLE CHECK] Triggered relaxed approval check\n")
+                                self.auto_respond(response[0], response[1])
+                                self.clear_buffer()
+                                with self.state_lock:
+                                    self.last_output_time = now
+                                    self.last_idle_snapshot = ""
+                            else:
+                                with self.state_lock:
+                                    self.last_idle_snapshot = snapshot
                             
             except KeyboardInterrupt:
                 self.print_status("Interrupted by user", YELLOW)
             finally:
+                self.stop_event.set()
                 self.restore_terminal()
                 
                 # Clean up
