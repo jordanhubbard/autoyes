@@ -50,6 +50,9 @@ install:
 	@cp autoyes.py "$(AUTOYES_HOME)/autoyes.py"
 	@chmod +x "$(AUTOYES_HOME)/autoyes.py"
 	@echo "✓ Installed autoyes.py to $(AUTOYES_HOME)"
+	@# Copy version file
+	@cp VERSION "$(AUTOYES_HOME)/VERSION"
+	@echo "✓ Installed VERSION to $(AUTOYES_HOME)"
 	@# Copy test script
 	@cp test_approval.py "$(AUTOYES_HOME)/test_approval.py"
 	@chmod +x "$(AUTOYES_HOME)/test_approval.py"

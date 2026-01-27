@@ -36,6 +36,13 @@ BOLD = '\033[1m'
 # Pattern to strip ANSI escape codes for pattern matching
 ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 
+def read_version() -> str:
+    version_path = Path(__file__).resolve().with_name("VERSION")
+    try:
+        return version_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return __version__
+
 class AutoYes:
     def __init__(self, command: list[str], enable_logging: bool = False):
         self.command = command
@@ -348,14 +355,15 @@ class AutoYes:
 
 def main():
     """Entry point"""
+    version = read_version()
     # Handle version flag
     if len(sys.argv) == 2 and sys.argv[1] in ('--version', '-v'):
-        print(f"AutoYes v{__version__}")
+        print(f"AutoYes v{version}")
         sys.exit(0)
     
     # Handle help flag
     if len(sys.argv) == 2 and sys.argv[1] in ('--help', '-h'):
-        print(f"AutoYes v{__version__} - Interactive PTY proxy with auto-approval")
+        print(f"AutoYes v{version} - Interactive PTY proxy with auto-approval")
         print("\nUsage: autoyes <command> [args...]")
         print("\nExamples:")
         print("  autoyes claude                        # Run Claude with auto-approval")
