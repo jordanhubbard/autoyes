@@ -97,19 +97,21 @@ class AutoYes:
         # Patterns that indicate the command is asking for approval
         # These work with Claude, Terraform, kubectl, and many other tools
         menu_prefix = r'(?:[›❯>➤•*]\s*)?'
+        # NOTE: In raw terminal mode, Enter sends \r (carriage return), not \n (line feed)
+        # TUIs expect \r for Enter key presses
         self.approval_patterns: list[tuple[re.Pattern, bytes, str]] = [
             # Numbered menu format (Claude, many CLI tools): "1. Yes" / "2. No" (optional 3rd option)
             # NOTE: Must require BOTH "1. Yes" AND "2. No" to avoid premature matching when
             # the menu is rendered incrementally (TUIs often send "1. Yes" before "2. No")
-            (re.compile(rf'{menu_prefix}1[\.)]\s*Yes\s+{menu_prefix}2[\.)]\s*No(?:\s+{menu_prefix}3[\.)]\s*[^\n]+)?', re.IGNORECASE | re.MULTILINE), b'\n', "pressing Enter"),
+            (re.compile(rf'{menu_prefix}1[\.)]\s*Yes\s+{menu_prefix}2[\.)]\s*No(?:\s+{menu_prefix}3[\.)]\s*[^\n]+)?', re.IGNORECASE | re.MULTILINE), b'\r', "pressing Enter"),
             # Generic approval prompts with yes/no options (e.g., "Continue? (y/n)")
-            (re.compile(r'(?:Do you want to|Continue|Proceed|Approve|Confirm|Are you sure)\b[^\n]*?\s*(?:\(|\[)?\s*(?:yes\s*/\s*no|y\s*/\s*n)\s*(?:\)|\])?', re.IGNORECASE), b'y\n', "sending 'y' + Enter"),
+            (re.compile(r'(?:Do you want to|Continue|Proceed|Approve|Confirm|Are you sure)\b[^\n]*?\s*(?:\(|\[)?\s*(?:yes\s*/\s*no|y\s*/\s*n)\s*(?:\)|\])?', re.IGNORECASE), b'y\r', "sending 'y' + Enter"),
             # Terraform style: "Enter a value:"
-            (re.compile(r'Enter a value:\s*$', re.IGNORECASE | re.MULTILINE), b'yes\n', "sending 'yes' + Enter"),
+            (re.compile(r'Enter a value:\s*$', re.IGNORECASE | re.MULTILINE), b'yes\r', "sending 'yes' + Enter"),
         ]
         self.relaxed_approval_patterns: list[tuple[re.Pattern, bytes, str]] = [
-            (re.compile(r'\?\s*(?:\(|\[)?\s*(?:yes|y)\s*/\s*(?:no|n)(?:\s*/\s*[^\s\]\)]+)?\s*(?:\)|\])?', re.IGNORECASE), b'y\n', "sending 'y' + Enter (relaxed)"),
-            (re.compile(r'\bYes\b\s*/\s*\bNo\b\s*/\s*[^\n]+', re.IGNORECASE), b'y\n', "sending 'y' + Enter (relaxed)"),
+            (re.compile(r'\?\s*(?:\(|\[)?\s*(?:yes|y)\s*/\s*(?:no|n)(?:\s*/\s*[^\s\]\)]+)?\s*(?:\)|\])?', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
+            (re.compile(r'\bYes\b\s*/\s*\bNo\b\s*/\s*[^\n]+', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
         ]
         self.numbered_menu_pattern = re.compile(r'^\s*[›❯>➤•*]?\s*(\d+)[\.)]\s*(Yes|No)\b', re.IGNORECASE)
         
@@ -217,7 +219,7 @@ class AutoYes:
             if self.enable_logging:
                 self.log("[MENU MATCH] Detected numbered Yes/No menu\n")
                 self.log(f"[MENU MATCH] Options: {options}\n")
-            return b'\n', "pressing Enter"
+            return b'\r', "pressing Enter"
 
         return None
         
