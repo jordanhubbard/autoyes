@@ -61,9 +61,10 @@ class AutoYes:
         self.buffer_limit = 16384
         self.read_chunk_size = 4096
         self.idle_prompt_timeout = 0.75
-        self.response_delay = 0.15
+        self.response_delay = 0.3  # Increased delay for TUI to be ready for input
         self.last_output_time = 0.0
         self.last_idle_snapshot = ""
+        self.pending_response = None  # Response waiting to be sent after TUI settles
         self.use_status_line = sys.stderr.isatty() and os.environ.get("TERM") not in (None, "dumb")
         
         # Logging setup
@@ -340,18 +341,29 @@ class AutoYes:
                             os.write(sys.stdout.fileno(), data)
                             sys.stdout.flush()
                             
-                            # Send auto-response if prompt was detected
-                            if response:
-                                time.sleep(self.response_delay)
-                                self.auto_respond(response[0], response[1])
-                                self.clear_buffer()
+                            # Queue auto-response to be sent after TUI settles
+                            if response and not self.pending_response:
+                                self.pending_response = response
+                                if self.enable_logging:
+                                    self.log(f"[PENDING] Queued response: {response[1]}\n")
                                 
                         except OSError:
                             break
 
-                    # Idle check - if no output for a while, do a relaxed pattern check
+                    # Check if we should send a pending response
+                    # Wait for TUI to settle (no output for response_delay time)
                     now = time.monotonic()
-                    if self.auto_approve and self.buffer:
+                    if self.pending_response and (now - self.last_output_time) >= self.response_delay:
+                        if self.enable_logging:
+                            self.log(f"[SENDING] TUI settled, sending response: {self.pending_response[1]}\n")
+                        sys.stdout.flush()
+                        self.auto_respond(self.pending_response[0], self.pending_response[1])
+                        self.clear_buffer()
+                        self.pending_response = None
+                        self.last_output_time = now
+                    
+                    # Idle check - if no output for a while, do a relaxed pattern check
+                    elif self.auto_approve and self.buffer and not self.pending_response:
                         if (now - self.last_output_time) >= self.idle_prompt_timeout:
                             snapshot = self.buffer[-512:]
                             if snapshot != self.last_idle_snapshot:
@@ -359,9 +371,7 @@ class AutoYes:
                                 if response:
                                     if self.enable_logging:
                                         self.log("[IDLE CHECK] Triggered relaxed approval check\n")
-                                    self.auto_respond(response[0], response[1])
-                                    self.clear_buffer()
-                                    self.last_output_time = now
+                                    self.pending_response = response
                                 else:
                                     self.last_idle_snapshot = snapshot
                             
