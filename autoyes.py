@@ -19,8 +19,6 @@ import tty
 import signal
 import re
 import time
-import threading
-import queue
 from typing import Optional
 from datetime import datetime
 from pathlib import Path
@@ -62,15 +60,10 @@ class AutoYes:
         self.original_tty = None
         self.buffer_limit = 16384
         self.read_chunk_size = 4096
-        self.pty_read_chunk_size = 16384
         self.idle_prompt_timeout = 0.75
         self.response_delay = 0.15
         self.last_output_time = 0.0
         self.last_idle_snapshot = ""
-        self.output_queue = queue.Queue()
-        self.stop_event = threading.Event()
-        self.state_lock = threading.Lock()
-        self.status_lock = threading.Lock()
         self.use_status_line = sys.stderr.isatty() and os.environ.get("TERM") not in (None, "dumb")
         
         # Logging setup
@@ -151,20 +144,18 @@ class AutoYes:
         """Print a status message to stderr"""
         formatted = f"{color}{BOLD}[AutoYes]{RESET} {color}{message}{RESET}"
         if visible and self.use_status_line:
-            with self.status_lock:
-                sys.stderr.write("\0337")
-                sys.stderr.write("\033[999B")
-                sys.stderr.write("\r\033[2K")
-                sys.stderr.write(formatted)
-                sys.stderr.write("\0338")
-                sys.stderr.flush()
+            sys.stderr.write("\0337")
+            sys.stderr.write("\033[999B")
+            sys.stderr.write("\r\033[2K")
+            sys.stderr.write(formatted)
+            sys.stderr.write("\0338")
+            sys.stderr.flush()
         if self.enable_logging:
             self.log(f"[STATUS] {message}\n")
         
     def toggle_auto_approve(self):
         """Toggle auto-approval mode"""
-        with self.state_lock:
-            self.auto_approve = not self.auto_approve
+        self.auto_approve = not self.auto_approve
         if self.auto_approve:
             self.print_status("Auto-approve mode: ON", GREEN, visible=True)
         else:
@@ -258,15 +249,12 @@ class AutoYes:
         # Add to buffer for pattern matching
         try:
             text = data.decode('utf-8', errors='replace')
-            with self.state_lock:
-                self.buffer += text
-                if len(self.buffer) > self.buffer_limit:
-                    self.buffer = self.buffer[-self.buffer_limit:]
-                buffer_snapshot = self.buffer
-                auto_approve = self.auto_approve
+            self.buffer += text
+            if len(self.buffer) > self.buffer_limit:
+                self.buffer = self.buffer[-self.buffer_limit:]
 
-            if auto_approve:
-                response = self.check_for_approval_prompt(buffer_snapshot)
+            if self.auto_approve:
+                response = self.check_for_approval_prompt(self.buffer)
                 if response:
                     return response
         except Exception as e:
@@ -278,25 +266,8 @@ class AutoYes:
         return None
 
     def clear_buffer(self):
-        with self.state_lock:
-            self.buffer = ""
-            self.last_idle_snapshot = ""
-
-    def pty_reader(self):
-        while not self.stop_event.is_set():
-            try:
-                data = os.read(self.master_fd, self.pty_read_chunk_size)
-                if not data:
-                    self.output_queue.put(None)
-                    return
-                with self.state_lock:
-                    self.last_output_time = time.monotonic()
-                    self.last_idle_snapshot = ""
-                response = self.handle_command_output(data)
-                self.output_queue.put((data, response))
-            except OSError:
-                self.output_queue.put(None)
-                return
+        self.buffer = ""
+        self.last_idle_snapshot = ""
             
     def setup_terminal(self):
         """Set terminal to raw mode"""
@@ -314,7 +285,7 @@ class AutoYes:
             termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, self.original_tty)
             
     def run(self):
-        """Main event loop"""
+        """Main event loop - single-threaded for reliable prompt detection"""
         # Print startup message
         self.print_status(f"Starting: {' '.join(self.command)}", BLUE)
         self.print_status("Auto-approval: ON (press Ctrl-Y to toggle)", GREEN)
@@ -334,13 +305,14 @@ class AutoYes:
             try:
                 self.setup_terminal()
                 self.last_output_time = time.monotonic()
-                reader_thread = threading.Thread(target=self.pty_reader, daemon=True)
-                reader_thread.start()
 
+                # Single-threaded I/O loop using select on both stdin and PTY
                 while True:
-                    r, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    # Wait for input from either user or command (with timeout for idle check)
+                    r, _, _ = select.select([sys.stdin, self.master_fd], [], [], 0.1)
 
                     if sys.stdin in r:
+                        # User input
                         try:
                             data = os.read(sys.stdin.fileno(), self.read_chunk_size)
                             if not data:
@@ -351,48 +323,51 @@ class AutoYes:
                         except OSError:
                             break
 
-                    while True:
+                    if self.master_fd in r:
+                        # Command output - use smaller reads to catch prompts before spinner floods
                         try:
-                            item = self.output_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                        if item is None:
-                            return
-                        data, response = item
-                        os.write(sys.stdout.fileno(), data)
-                        sys.stdout.flush()
-                        if response:
-                            time.sleep(self.response_delay)
-                            self.auto_respond(response[0], response[1])
-                            self.clear_buffer()
-
-                    now = time.monotonic()
-                    with self.state_lock:
-                        auto_approve = self.auto_approve
-                        buffer_snapshot = self.buffer
-                        last_output_time = self.last_output_time
-                        last_idle_snapshot = self.last_idle_snapshot
-
-                    if auto_approve and buffer_snapshot and (now - last_output_time) >= self.idle_prompt_timeout:
-                        snapshot = buffer_snapshot[-512:]
-                        if snapshot != last_idle_snapshot:
-                            response = self.check_for_approval_prompt(buffer_snapshot, relaxed=True)
+                            data = os.read(self.master_fd, 4096)
+                            if not data:
+                                break
+                            
+                            self.last_output_time = time.monotonic()
+                            
+                            # Check for approval prompt BEFORE adding to buffer
+                            # This catches the prompt even if spinner data follows in same chunk
+                            response = self.handle_command_output(data)
+                            
+                            # Forward output to user
+                            os.write(sys.stdout.fileno(), data)
+                            sys.stdout.flush()
+                            
+                            # Send auto-response if prompt was detected
                             if response:
-                                if self.enable_logging:
-                                    self.log("[IDLE CHECK] Triggered relaxed approval check\n")
+                                time.sleep(self.response_delay)
                                 self.auto_respond(response[0], response[1])
                                 self.clear_buffer()
-                                with self.state_lock:
+                                
+                        except OSError:
+                            break
+
+                    # Idle check - if no output for a while, do a relaxed pattern check
+                    now = time.monotonic()
+                    if self.auto_approve and self.buffer:
+                        if (now - self.last_output_time) >= self.idle_prompt_timeout:
+                            snapshot = self.buffer[-512:]
+                            if snapshot != self.last_idle_snapshot:
+                                response = self.check_for_approval_prompt(self.buffer, relaxed=True)
+                                if response:
+                                    if self.enable_logging:
+                                        self.log("[IDLE CHECK] Triggered relaxed approval check\n")
+                                    self.auto_respond(response[0], response[1])
+                                    self.clear_buffer()
                                     self.last_output_time = now
-                                    self.last_idle_snapshot = ""
-                            else:
-                                with self.state_lock:
+                                else:
                                     self.last_idle_snapshot = snapshot
                             
             except KeyboardInterrupt:
                 self.print_status("Interrupted by user", YELLOW)
             finally:
-                self.stop_event.set()
                 self.restore_terminal()
                 
                 # Clean up
