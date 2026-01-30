@@ -172,31 +172,37 @@ class AutoYes:
             
     def check_for_approval_prompt(self, text: str, relaxed: bool = False) -> Optional[tuple[bytes, str]]:
         """Check if the text contains an approval prompt"""
-        # Look at the last few lines of the buffer
-        normalized_text = text.replace('\r\n', '\n').replace('\r', '\n')
-        lines = normalized_text.split('\n')
-        max_lines = 20 if relaxed else 10
-        last_lines = '\n'.join(lines[-max_lines:])
-        
-        # Strip ANSI escape codes for cleaner pattern matching
-        # Commands often add colors/formatting that can break patterns
-        clean_text = ANSI_ESCAPE.sub('', last_lines)
-        # Also normalize line endings
+        # Strip ANSI escape codes first for cleaner processing
+        clean_text = ANSI_ESCAPE.sub('', text)
+        # Normalize line endings
         clean_text = clean_text.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Filter out empty lines and spinner-only lines to handle TUI animations
+        # that flood the buffer and push the actual prompt out of view
+        all_lines = clean_text.split('\n')
+        # Spinner characters commonly used by TUI apps
+        spinner_chars = set('⏺⏹⏸⏵⏴●○◐◑◒◓◴◵◶◷⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏▁▂▃▄▅▆▇█✓✗✳✴✵')
+        meaningful_lines = [
+            line for line in all_lines 
+            if line.strip() and not all(c in spinner_chars or c.isspace() for c in line)
+        ]
+        
+        # Take last N meaningful lines (more lines in relaxed mode for idle check)
+        max_lines = 50 if relaxed else 30
+        last_lines = '\n'.join(meaningful_lines[-max_lines:])
 
-        menu_response = self.match_numbered_menu(clean_text)
+        menu_response = self.match_numbered_menu(last_lines)
         if menu_response:
             return menu_response
 
         if self.enable_logging:
             mode = "RELAXED" if relaxed else "STRICT"
             self.log(f"\n[PATTERN CHECK] Mode: {mode} | Buffer size: {len(text)} chars\n")
-            self.log(f"[PATTERN CHECK] Last {max_lines} lines (raw):\n{repr(last_lines)}\n")
-            self.log(f"[PATTERN CHECK] Last {max_lines} lines (clean):\n{repr(clean_text)}\n")
+            self.log(f"[PATTERN CHECK] Last {max_lines} non-empty lines:\n{repr(last_lines)}\n")
         
         patterns = self.approval_patterns + (self.relaxed_approval_patterns if relaxed else [])
         for i, (pattern, response, response_label) in enumerate(patterns):
-            match = pattern.search(clean_text)
+            match = pattern.search(last_lines)
             if match:
                 if self.enable_logging:
                     self.log(f"[PATTERN MATCH] Pattern #{i} matched: {pattern.pattern}\n")
