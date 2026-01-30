@@ -34,7 +34,17 @@ RESET = '\033[0m'
 BOLD = '\033[1m'
 
 # Pattern to strip ANSI escape codes for pattern matching
-ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+# Handles standard CSI, DEC private mode (\x1b[?...), and OSC sequences (\x1b]...\x07)
+ANSI_ESCAPE = re.compile(
+    r'\x1b'                         # ESC
+    r'(?:'
+    r'\[[?!>]*[0-9;]*[a-zA-Z<>~]'   # CSI sequences (including DEC private mode)
+    r'|'
+    r'\][^\x07]*\x07'               # OSC sequences (terminated by BEL)
+    r'|'
+    r'\][^\x1b]*\x1b\\'             # OSC sequences (terminated by ST)
+    r')'
+)
 
 def read_version() -> str:
     version_path = Path(__file__).resolve().with_name("VERSION")
