@@ -105,10 +105,10 @@ class AutoYes:
         menu_prefix = r'(?:[›❯>➤•*]\s*)?'
         self.approval_patterns: list[tuple[re.Pattern, bytes, str]] = [
             # Numbered menu format (Claude, many CLI tools): "1. Yes" / "2. No" (optional 3rd option)
+            # NOTE: Must require BOTH "1. Yes" AND "2. No" to avoid premature matching when
+            # the menu is rendered incrementally (TUIs often send "1. Yes" before "2. No")
             (re.compile(rf'{menu_prefix}1[\.)]\s*Yes\s+{menu_prefix}2[\.)]\s*No(?:\s+{menu_prefix}3[\.)]\s*[^\n]+)?', re.IGNORECASE | re.MULTILINE), b'\n', "pressing Enter"),
-            # "Do you want to proceed?" followed by "1. Yes"
-            (re.compile(rf'Do you want to (?:proceed|continue)\?\s+{menu_prefix}1[\.)]\s*Yes', re.IGNORECASE | re.MULTILINE), b'\n', "pressing Enter"),
-            # Generic approval prompts with yes/no options
+            # Generic approval prompts with yes/no options (e.g., "Continue? (y/n)")
             (re.compile(r'(?:Do you want to|Continue|Proceed|Approve|Confirm|Are you sure)\b[^\n]*?\s*(?:\(|\[)?\s*(?:yes\s*/\s*no|y\s*/\s*n)\s*(?:\)|\])?', re.IGNORECASE), b'y\n', "sending 'y' + Enter"),
             # Terraform style: "Enter a value:"
             (re.compile(r'Enter a value:\s*$', re.IGNORECASE | re.MULTILINE), b'yes\n', "sending 'yes' + Enter"),
