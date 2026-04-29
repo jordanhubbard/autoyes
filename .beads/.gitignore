@@ -11,6 +11,7 @@ daemon.log
 daemon.pid
 bd.sock
 sync-state.json
+export-state.json
 last-touched
 embeddeddolt/
 backup/
