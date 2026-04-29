@@ -19,6 +19,9 @@ import tty
 import signal
 import re
 import time
+import fcntl
+import struct
+import shutil
 from typing import Optional
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +33,8 @@ RED = '\033[91m'
 BLUE = '\033[94m'
 RESET = '\033[0m'
 BOLD = '\033[1m'
+
+Winsize = tuple[int, int]
 
 # Pattern to strip ANSI escape codes for pattern matching
 # Handles standard CSI, DEC private mode (\x1b[?...), and OSC sequences (\x1b]...\x07)
@@ -43,6 +48,35 @@ ANSI_ESCAPE = re.compile(
     r'\][^\x1b]*\x1b\\'             # OSC sequences (terminated by ST)
     r')'
 )
+
+def get_fd_winsize(fd: int) -> Optional[Winsize]:
+    """Return terminal rows and columns for fd, ignoring unusable 0x0 sizes."""
+    try:
+        packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
+        rows, cols, _xpixels, _ypixels = struct.unpack("HHHH", packed)
+    except (OSError, ValueError, struct.error):
+        return None
+
+    if rows <= 0 or cols <= 0:
+        return None
+    return rows, cols
+
+
+def set_fd_winsize(fd: int, winsize: Optional[Winsize]) -> bool:
+    """Set terminal rows and columns for fd."""
+    if not winsize:
+        return False
+
+    rows, cols = winsize
+    if rows <= 0 or cols <= 0:
+        return False
+
+    try:
+        packed = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
+    except (OSError, ValueError, struct.error):
+        return False
+    return True
 
 def read_version() -> str:
     version_path = Path(__file__).resolve().with_name("VERSION")
@@ -66,6 +100,7 @@ class AutoYes:
         self.last_idle_snapshot = ""
         self.pending_response = None  # Response waiting to be sent after TUI settles
         self.use_status_line = sys.stderr.isatty() and os.environ.get("TERM") not in (None, "dumb")
+        self.previous_sigwinch = None
         
         # Logging setup
         self.enable_logging = enable_logging
@@ -286,6 +321,57 @@ class AutoYes:
         """Restore terminal to original mode"""
         if self.original_tty:
             termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, self.original_tty)
+
+    def get_parent_winsize(self) -> Optional[Winsize]:
+        """Read the real terminal size from any available parent stdio fd."""
+        for stream in (sys.stdin, sys.stdout, sys.stderr):
+            try:
+                fd = stream.fileno()
+            except (AttributeError, OSError, ValueError):
+                continue
+
+            winsize = get_fd_winsize(fd)
+            if winsize:
+                return winsize
+
+        terminal_size = shutil.get_terminal_size(fallback=(80, 24))
+        if terminal_size.lines > 0 and terminal_size.columns > 0:
+            return terminal_size.lines, terminal_size.columns
+
+        return 24, 80
+
+    def apply_child_winsize(self, winsize: Optional[Winsize]):
+        """Apply startup terminal geometry inside the child before exec."""
+        if not winsize:
+            return
+
+        set_fd_winsize(sys.stdin.fileno(), winsize)
+        rows, cols = winsize
+        os.environ["LINES"] = str(rows)
+        os.environ["COLUMNS"] = str(cols)
+
+    def sync_pty_winsize(self, winsize: Optional[Winsize] = None) -> bool:
+        """Copy the parent terminal size to the child PTY."""
+        if self.master_fd is None:
+            return False
+
+        return set_fd_winsize(self.master_fd, winsize or self.get_parent_winsize())
+
+    def handle_sigwinch(self, signum, frame):
+        """Forward terminal resize events to the child PTY."""
+        self.sync_pty_winsize()
+
+        if callable(self.previous_sigwinch):
+            self.previous_sigwinch(signum, frame)
+
+    def install_resize_handler(self):
+        self.previous_sigwinch = signal.getsignal(signal.SIGWINCH)
+        signal.signal(signal.SIGWINCH, self.handle_sigwinch)
+
+    def restore_resize_handler(self):
+        if self.previous_sigwinch is not None:
+            signal.signal(signal.SIGWINCH, self.previous_sigwinch)
+            self.previous_sigwinch = None
             
     def run(self):
         """Main event loop - single-threaded for reliable prompt detection"""
@@ -298,21 +384,29 @@ class AutoYes:
             log_path = Path.home() / ".autoyes" / "autoyes.log"
             self.print_status(f"Logging to: {log_path}", BLUE)
         
+        initial_winsize = self.get_parent_winsize()
+
         # Spawn command in a PTY
         pid, self.master_fd = pty.fork()
         
         if pid == 0:  # Child process
+            self.apply_child_winsize(initial_winsize)
             # Execute the command
             os.execvp(self.command[0], self.command)
         else:  # Parent process
             try:
+                self.sync_pty_winsize(initial_winsize)
+                self.install_resize_handler()
                 self.setup_terminal()
                 self.last_output_time = time.monotonic()
 
                 # Single-threaded I/O loop using select on both stdin and PTY
                 while True:
                     # Wait for input from either user or command (with timeout for idle check)
-                    r, _, _ = select.select([sys.stdin, self.master_fd], [], [], 0.1)
+                    try:
+                        r, _, _ = select.select([sys.stdin, self.master_fd], [], [], 0.1)
+                    except InterruptedError:
+                        continue
 
                     if sys.stdin in r:
                         # User input
@@ -380,6 +474,7 @@ class AutoYes:
             except KeyboardInterrupt:
                 self.print_status("Interrupted by user", YELLOW)
             finally:
+                self.restore_resize_handler()
                 self.restore_terminal()
                 
                 # Clean up
