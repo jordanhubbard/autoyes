@@ -1,2 +1,4 @@
 {"id":"int-f4fbb015","kind":"field_change","created_at":"2026-04-29T22:02:30.098751Z","actor":"Jordan Hubbard","issue_id":"autoyes-b9m","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-fb6215d3","kind":"field_change","created_at":"2026-04-29T22:12:39.056813Z","actor":"Jordan Hubbard","issue_id":"autoyes-b9m","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-feec8c8d","kind":"field_change","created_at":"2026-04-30T05:28:53.433693Z","actor":"Jordan Hubbard","issue_id":"autoyes-7xt","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-17741603","kind":"field_change","created_at":"2026-04-30T05:29:30.618451Z","actor":"Jordan Hubbard","issue_id":"autoyes-7xt","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Fixed numbered Codex yes-menu detection and added tests"}}

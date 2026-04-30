@@ -148,7 +148,10 @@ class AutoYes:
             (re.compile(r'\?\s*(?:\(|\[)?\s*(?:yes|y)\s*/\s*(?:no|n)(?:\s*/\s*[^\s\]\)]+)?\s*(?:\)|\])?', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
             (re.compile(r'\bYes\b\s*/\s*\bNo\b\s*/\s*[^\n]+', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
         ]
-        self.numbered_menu_pattern = re.compile(r'^\s*[›❯>➤•*]?\s*(\d+)[\.)]\s*(Yes|No)\b', re.IGNORECASE)
+        self.numbered_menu_pattern = re.compile(
+            r'^\s*(?P<selected>[›❯>➤•*])?\s*(?P<number>\d+)[\.)]\s*(?P<label>Yes|No)\b',
+            re.IGNORECASE,
+        )
         
     def log(self, message: str):
         """Write a message to the log file"""
@@ -244,13 +247,29 @@ class AutoYes:
         return None
 
     def match_numbered_menu(self, clean_text: str) -> Optional[tuple[bytes, str]]:
-        options = {}
+        options = []
         for line in clean_text.splitlines():
             match = self.numbered_menu_pattern.match(line)
             if match:
-                options[match.group(1)] = match.group(2).lower()
+                options.append({
+                    "number": match.group("number"),
+                    "label": match.group("label").lower(),
+                    "selected": bool(match.group("selected")),
+                })
 
-        if options.get("1") == "yes" and options.get("2") == "no":
+        has_yes = any(option["label"] == "yes" for option in options)
+        has_no = any(option["label"] == "no" for option in options)
+        if not has_yes or not has_no:
+            return None
+
+        selected_option = next((option for option in options if option["selected"]), None)
+        if selected_option:
+            if selected_option["label"] != "yes":
+                return None
+        elif not options or options[0]["number"] != "1" or options[0]["label"] != "yes":
+            return None
+
+        if options:
             if self.enable_logging:
                 self.log("[MENU MATCH] Detected numbered Yes/No menu\n")
                 self.log(f"[MENU MATCH] Options: {options}\n")
