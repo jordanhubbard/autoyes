@@ -149,9 +149,10 @@ class AutoYes:
             (re.compile(r'\bYes\b\s*/\s*\bNo\b\s*/\s*[^\n]+', re.IGNORECASE), b'y\r', "sending 'y' + Enter (relaxed)"),
         ]
         self.numbered_menu_pattern = re.compile(
-            r'^\s*(?P<selected>[›❯>➤•*])?\s*(?P<number>\d+)[\.)]\s*(?P<label>Yes|No)\b',
+            r'^\s*(?P<selected>[›❯>➤•*])?\s*(?P<number>\d+)[\.)]\s*(?P<label>Yes|No)\b(?P<rest>[^\n]*)',
             re.IGNORECASE,
         )
+        self.dont_ask_again_pattern = re.compile(r"don'?t ask again", re.IGNORECASE)
         
     def log(self, message: str):
         """Write a message to the log file"""
@@ -255,12 +256,34 @@ class AutoYes:
                     "number": match.group("number"),
                     "label": match.group("label").lower(),
                     "selected": bool(match.group("selected")),
+                    "text": match.group("rest") or "",
                 })
 
         has_yes = any(option["label"] == "yes" for option in options)
         has_no = any(option["label"] == "no" for option in options)
         if not has_yes or not has_no:
             return None
+
+        # Prefer a "Yes, and don't ask again for ..." option over a plain "Yes" so we
+        # stop getting re-prompted for the same command in the future.
+        dont_ask_index = next(
+            (
+                i for i, option in enumerate(options)
+                if option["label"] == "yes" and self.dont_ask_again_pattern.search(option["text"])
+            ),
+            None,
+        )
+        if dont_ask_index is not None:
+            selected_index = next((i for i, option in enumerate(options) if option["selected"]), 0)
+            if self.enable_logging:
+                self.log("[MENU MATCH] Detected numbered menu with 'don't ask again' option\n")
+                self.log(f"[MENU MATCH] Options: {options}\n")
+            if dont_ask_index == selected_index:
+                return b'\r', "pressing Enter"
+            delta = dont_ask_index - selected_index
+            arrow = b'\x1b[B' if delta > 0 else b'\x1b[A'
+            response = arrow * abs(delta) + b'\r'
+            return response, f"selecting 'don't ask again' option (moving {abs(delta)} and pressing Enter)"
 
         selected_option = next((option for option in options if option["selected"]), None)
         if selected_option:

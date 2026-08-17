@@ -21,10 +21,8 @@ $ command bd ready
 Press enter to confirm or esc to cancel
 """
 
-        self.assertEqual(
-            self.proxy.check_for_approval_prompt(prompt),
-            (b"\r", "pressing Enter"),
-        )
+        response, _label = self.proxy.check_for_approval_prompt(prompt)
+        self.assertEqual(response, b"\x1b[B\r")
 
     def test_detects_codex_menu_with_yes_and_no_descriptions(self):
         prompt = """
